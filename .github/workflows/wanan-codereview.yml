@@ -198,18 +198,21 @@ jobs:
 
             echo "Attempting to add inline comment to $file:$line"
 
-            # 保留原有的错误处理逻辑
-            if ! gh api \
+            echo "Adding comment to $file:$line..."
+            result=$(gh api \
               repos/${{ github.repository }}/pulls/${{ env.PR_NUMBER }}/comments \
               -X POST \
               -f body="$body" \
               -f commit_id="$HEAD_SHA" \
               -f path="$file" \
-              -F line="$line"+3 > /dev/null 2>&1
-            then
-              echo "❌ ERROR: Failed to add inline comment to $file:$line"
-            else
+              -F line="$line"+3 2>&1)
+            
+            if [ $? -eq 0 ]; then
               echo "✅ Success: Added inline comment to $file:$line"
+            else
+              echo "❌ ERROR: Failed to add inline comment to $file:$line"
+              echo "Error details: $result"
+              echo "Debug info: file=$file, line=$line, body_length=${#body}"
             fi
           done
         env:
