@@ -169,7 +169,6 @@ jobs:
       # 9) Add inline comments
       - name: Add inline comments
         run: |
-          # 在pull_request_target事件中，应该使用PR分支的SHA而不是目标分支的SHA
           HEAD_SHA="${{ github.event.pull_request.head.sha }}"
           echo "HEAD_SHA=$HEAD_SHA"
 
@@ -198,21 +197,17 @@ jobs:
 
             echo "Attempting to add inline comment to $file:$line"
 
-            echo "Adding comment to $file:$line..."
-            result=$(gh api \
+            if ! gh api \
               repos/${{ github.repository }}/pulls/${{ env.PR_NUMBER }}/comments \
               -X POST \
               -f body="$body" \
               -f commit_id="$HEAD_SHA" \
               -f path="$file" \
-              -F line="$line"+3 2>&1)
-            
-            if [ $? -eq 0 ]; then
-              echo "✅ Success: Added inline comment to $file:$line"
-            else
+              -F line="$line"+3  2>&1
+            then
               echo "❌ ERROR: Failed to add inline comment to $file:$line"
-              echo "Error details: $result"
-              echo "Debug info: file=$file, line=$line, body_length=${#body}"
+            else
+              echo "✅ Success: Added inline comment to $file:$line"
             fi
           done
         env:
