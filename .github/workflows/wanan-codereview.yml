@@ -165,82 +165,25 @@ jobs:
           echo "Markdown generated:"
           cat comment.md
 
+
       # 9) Add inline comments
       - name: Add inline comments
         run: |
+          # 在pull_request_target事件中，应该使用PR分支的SHA而不是目标分支的SHA
           HEAD_SHA="${{ github.event.pull_request.head.sha }}"
           echo "HEAD_SHA=$HEAD_SHA"
-          # 初始化计数器
-          total_issues=0
-          success_count=0
-          failed_count=0
-          # 读取问题总数（兼容空数组）
-          total_issues=$(jq '.issues | length' response.json || echo 0)
-          echo "Total issues to process: $total_issues"
-          
-          # 定义重试函数（处理临时网络错误）
-          retry_gh_api() {
-            local max_retries=3
-            local retry_delay=2
-            local attempt=1
-            local exit_code=0
 
-            while [ $attempt -le $max_retries ]; do
-              echo "🔄 尝试第 $attempt 次调用 API (最多 $max_retries 次)"
-              # 执行gh api，保留错误输出到临时文件
-              gh api \
-                repos/${{ github.repository }}/pulls/${{ env.PR_NUMBER }}/comments \
-                -X POST \
-                -f body="$1" \
-                -f commit_id="$HEAD_SHA" \
-                -f path="$2" \
-                -F line="$3" > api_response.log 2> api_error.log
-              exit_code=$?
-              
-              if [ $exit_code -eq 0 ]; then
-                # 成功则清理日志并返回
-                rm -f api_response.log api_error.log
-                return 0
-              fi
-              
-              # 失败则打印错误信息，延迟后重试
-              echo "❌ API 调用失败 (尝试 $attempt): $(cat api_error.log)"
-              attempt=$((attempt + 1))
-              sleep $retry_delay
-            done
-            
-            # 所有重试失败，保留错误日志
-            echo "❌ 所有重试均失败，错误详情: $(cat api_error.log)"
-            rm -f api_response.log api_error.log
-            return $exit_code
-          }
+          jq -c '.issues[]' response.json | while read -r issue; do
+            file=$(echo "$issue" | jq -r '.file')
+            line=$(echo "$issue" | jq -r '.line')
+            type=$(echo "$issue" | jq -r '.bug_type')
+            desc=$(echo "$issue" | jq -r '.description')
+            sug=$(echo "$issue" | jq -r '.suggestion')
+            sev=$(echo "$issue" | jq -r '.severity')
+            # 提取历史未修复标记
+            historical=$(echo "$issue" | jq -r '.historical_mention')
 
-          # 循环处理每个问题（添加set -e禁用，确保循环不中断）
-          set +e
-          jq -c '.issues[]?' response.json | while read -r issue; do
-            # 跳过空的issue
-            if [ -z "$issue" ]; then
-              echo "ℹ️  跳过空的issue条目"
-              continue
-            fi
-
-            # 提取字段并做空值默认处理
-            file=$(echo "$issue" | jq -r '.file // "unknown_file"')
-            line=$(echo "$issue" | jq -r '.line // "0"')
-            type=$(echo "$issue" | jq -r '.bug_type // "未知类型"')
-            desc=$(echo "$issue" | jq -r '.description // "无描述"')
-            sug=$(echo "$issue" | jq -r '.suggestion // "无建议"')
-            sev=$(echo "$issue" | jq -r '.severity // "未知程度"')
-            historical=$(echo "$issue" | jq -r '.historical_mention // "false"')
-
-            # 跳过无效行号/文件（避免无意义的API调用）
-            if [ "$file" = "unknown_file" ] || [ "$line" = "0" ] || [ "$line" = "null" ]; then
-              echo "⚠️  跳过无效条目: 文件=$file 行号=$line"
-              failed_count=$((failed_count + 1))
-              continue
-            fi
-
-            # 处理历史未修复标记
+            # 对历史未修复问题添加特殊前缀和提示
             if [ "$historical" = "true" ]; then
               header="**AI 代码审查意见**"
               extra_note=$'\n**提示**: 此问题已在历史审查中多次提及，请优先处理'
@@ -249,40 +192,26 @@ jobs:
               extra_note=""
             fi
 
-            # 拼接评论内容（转义特殊字符，避免printf解析错误）
+            # 拼接评论内容（包含历史问题标识）
             body=$(printf "%s\n**类型**: %s\n**描述**: %s\n**建议**: %s\n**程度**: %s%s" \
-              "$header" "$type" "$(echo "$desc" | sed 's/[%\\]/\\&/g')" "$(echo "$sug" | sed 's/[%\\]/\\&/g')" "$sev" "$extra_note")
-            echo "📝 准备添加内联评论到 $file:$line"
+              "$header" "$type" "$desc" "$sug" "$sev" "$extra_note")
 
-            # 调用重试函数添加评论
-            if retry_gh_api "$body" "$file" "$line"; then
-              echo "✅ Success: 添加评论到 $file:$line"
-              success_count=$((success_count + 1))
+            echo "Attempting to add inline comment to $file:$line"
+
+            # 保留原有的错误处理逻辑
+            if ! gh api \
+              repos/${{ github.repository }}/pulls/${{ env.PR_NUMBER }}/comments \
+              -X POST \
+              -f body="$body" \
+              -f commit_id="$HEAD_SHA" \
+              -f path="$file" \
+              -F line="$line" > /dev/null 2>&1
+            then
+              echo "❌ ERROR: Failed to add inline comment to $file:$line"
             else
-              echo "❌ ERROR: 无法添加评论到 $file:$line"
-              failed_count=$((failed_count + 1))
+              echo "✅ Success: Added inline comment to $file:$line"
             fi
-
-            # 限速：避免API限流（每请求间隔0.5秒）
-            sleep 0.5
           done
-          set -e
-
-          # 输出统计结果
-          echo "========================================="
-          echo "内联评论添加完成统计:"
-          echo "总计问题数: $total_issues"
-          echo "成功添加: $success_count"
-          echo "失败数量: $failed_count"
-          echo "========================================="
-
-          # 警告但不终止工作流
-          if [ $failed_count -gt 0 ]; then
-            echo "⚠️  警告: 有 $failed_count 个评论添加失败，但工作流将继续执行"
-          fi
-
-          # 强制返回成功
-          exit 0
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
