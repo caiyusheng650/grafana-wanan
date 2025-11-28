@@ -172,6 +172,15 @@ jobs:
           HEAD_SHA="${{ github.event.pull_request.head.sha }}"
           echo "HEAD_SHA=$HEAD_SHA"
 
+          # 初始化计数器
+          total_issues=0
+          success_count=0
+          failed_count=0
+
+          # 获取所有问题数量
+          total_issues=$(jq '.issues | length' response.json)
+          echo "Total issues to process: $total_issues"
+
           jq -c '.issues[]' response.json | while read -r issue; do
             file=$(echo "$issue" | jq -r '.file')
             line=$(echo "$issue" | jq -r '.line')
@@ -197,19 +206,39 @@ jobs:
 
             echo "Attempting to add inline comment to $file:$line"
 
-            if ! gh api \
-              repos/${{ github.repository }}/pulls/${{ env.PR_NUMBER }}/comments \
-              -X POST \
-              -f body="$body" \
-              -f commit_id="$HEAD_SHA" \
-              -f path="$file" \
-              -F line="$line"+3  2>&1
-            then
-              echo "❌ ERROR: Failed to add inline comment to $file:$line"
-            else
+            # 使用子shell处理单个评论，确保错误不会影响整个循环
+            if (
+              gh api \
+                repos/${{ github.repository }}/pulls/${{ env.PR_NUMBER }}/comments \
+                -X POST \
+                -f body="$body" \
+                -f commit_id="$HEAD_SHA" \
+                -f path="$file" \
+                -F line="$line" 2>/dev/null
+            ); then
               echo "✅ Success: Added inline comment to $file:$line"
+              success_count=$((success_count + 1))
+            else
+              echo "❌ ERROR: Failed to add inline comment to $file:$line"
+              echo "   继续处理下一个问题..."
+              failed_count=$((failed_count + 1))
             fi
           done
+
+          echo "========================================="
+          echo "内联评论添加完成统计:"
+          echo "总计问题数: $total_issues"
+          echo "成功添加: $success_count"
+          echo "失败数量: $failed_count"
+          echo "========================================="
+
+          # 即使有失败的评论，也不让整个步骤失败
+          if [ $failed_count -gt 0 ]; then
+            echo "⚠️  警告: 有 $failed_count 个评论添加失败，但工作流将继续执行"
+          fi
+
+          # 总是返回成功状态码，确保工作流继续
+          exit 0
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
