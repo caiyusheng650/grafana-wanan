@@ -205,7 +205,7 @@ jobs:
               -f body="$body" \
               -f commit_id="$HEAD_SHA" \
               -f path="$file" \
-              -F line="$line" > /dev/null 2>&1
+              -F line="$line"+3 > /dev/null 2>&1
             then
               echo "❌ ERROR: Failed to add inline comment to $file:$line"
             else
