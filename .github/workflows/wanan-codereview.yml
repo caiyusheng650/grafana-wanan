@@ -110,25 +110,85 @@ jobs:
           cat payload.json
           echo "=================================="
 
-      # 7) Send to AI Review API
-      - name: Call AI Review API
+      # 7) Submit Review Task (Async)
+      - name: Submit Review Task
+        id: submit_task
         run: |
-          # 打印API URL用于调试（注意：GitHub Actions会自动保护敏感信息）
           echo "使用的API URL: ${{ secrets.CODE_REVIEW_API_URL }}"
           
+          # 提交异步任务
           curl -v -X POST \
             -H "X-Api-Key: ${{ secrets.CODE_REVIEW_API_TOKEN }}" \
             -H "Content-Type: application/json" \
             --data-binary @payload.json \
-            --max-time 3600 \
-            "${{ secrets.CODE_REVIEW_API_URL }}/api/codereview/review" \
-            -o response.json
+            "${{ secrets.CODE_REVIEW_API_URL }}/api/codereview/submit" \
+            -o task_response.json
 
-          echo "=== API Response (response.json) ==-"
-          cat response.json
-          echo "===================================="
+          echo "=== Task Submission Response ==="
+          cat task_response.json
+          echo "================================"
+          
+          # 提取任务ID
+          TASK_ID=$(jq -r '.task_id' task_response.json)
+          echo "TASK_ID=$TASK_ID" >> $GITHUB_ENV
+          echo "Task ID: $TASK_ID"
 
-      # 8) Format markdown
+      # 8) Poll for Task Completion
+      - name: Poll for Task Completion
+        id: poll_task
+        run: |
+          MAX_POLLS=20  # 最大轮询次数（60次 * 30秒 = 30分钟）
+          POLL_INTERVAL=30  # 轮询间隔（秒）
+          
+          for i in $(seq 1 $MAX_POLLS); do
+            echo "Polling attempt $i/$MAX_POLLS..."
+            
+            # 查询任务状态
+            curl -s -X GET \
+              -H "X-Api-Key: ${{ secrets.CODE_REVIEW_API_TOKEN }}" \
+              "${{ secrets.CODE_REVIEW_API_URL }}/api/codereview/status/${{ env.TASK_ID }}" \
+              -o status_response.json
+            
+            STATUS=$(jq -r '.status' status_response.json)
+            echo "Current status: $STATUS"
+            
+            case $STATUS in
+              "completed")
+                echo "✅ Task completed successfully!"
+                # 直接从状态响应中提取结果，无需再调用/result接口
+                jq '.result' status_response.json > response.json
+                
+                echo "=== Final Response ==="
+                cat response.json
+                echo "====================="
+                exit 0
+                ;;
+              "failed")
+                echo "❌ Task failed!"
+                ERROR_MSG=$(jq -r '.error' status_response.json)
+                echo "Error: $ERROR_MSG"
+                exit 1
+                ;;
+              "processing")
+                echo "⏳ Task still processing..."
+                sleep $POLL_INTERVAL
+                ;;
+              "pending")
+                echo "⏳ Task still pending..."
+                sleep $POLL_INTERVAL
+                ;;
+              *)
+                echo "❓ Unknown status: $STATUS"
+                sleep $POLL_INTERVAL
+                ;;
+            esac
+          done
+          
+          # 如果达到最大轮询次数仍未完成
+          echo "❌ Timeout: Task did not complete within $((MAX_POLLS * POLL_INTERVAL / 60)) minutes"
+          exit 1
+
+      # 9) Format markdown
       - name: Generate Review Markdown
         run: |
           # 首先根据严重程度生成conclusion
@@ -166,7 +226,7 @@ jobs:
           cat comment.md
 
 
-      # 9) Add inline comments
+      # 10) Add inline comments
       - name: Add inline comments
         run: |
           # 在pull_request_target事件中，应该使用PR分支的SHA而不是目标分支的SHA
@@ -198,27 +258,24 @@ jobs:
 
             echo "Attempting to add inline comment to $file:$line"
 
-            echo "Adding comment to $file:$line..."
-            result=$(gh api \
+            # 保留原有的错误处理逻辑
+            if ! gh api \
               repos/${{ github.repository }}/pulls/${{ env.PR_NUMBER }}/comments \
               -X POST \
               -f body="$body" \
               -f commit_id="$HEAD_SHA" \
               -f path="$file" \
-              -F line="$line"+3 2>&1)
-            
-            if [ $? -eq 0 ]; then
-              echo "✅ Success: Added inline comment to $file:$line"
-            else
+              -F line="$line" > /dev/null 2>&1
+            then
               echo "❌ ERROR: Failed to add inline comment to $file:$line"
-              echo "Error details: $result"
-              echo "Debug info: file=$file, line=$line, body_length=${#body}"
+            else
+              echo "✅ Success: Added inline comment to $file:$line"
             fi
           done
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # 10) Create Summary Comment
+      # 11) Create Summary Comment
       - name: Create or update summary comment
         uses: peter-evans/create-or-update-comment@v3
         with:
